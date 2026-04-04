@@ -2,6 +2,9 @@
 # Script outline to install and build kernel.
 # Author: Siddhant Jajoo.
 
+sudo apt-get update
+sudo apt-get install -y gcc-aarch64-linux-gnu
+
 set -e
 set -u
 
