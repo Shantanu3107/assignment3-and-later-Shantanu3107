@@ -1,3 +1,4 @@
+
 // aesdsocket.c
 // Implementation for the assignment: TCP server on port 9000
 
@@ -30,7 +31,6 @@ static int listen_fd = -1;
 static void signal_handler(int signum)
 {
     (void)signum;
-    syslog(LOG_INFO, "Caught signal, exiting");   // <-- ADDED
     exit_requested = 1;
 }
 
@@ -53,7 +53,7 @@ static int create_and_bind(const char *port)
     int opt = 1;
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_INET; // IPv4 only (assignment context)
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
@@ -70,6 +70,7 @@ static int create_and_bind(const char *port)
         }
 
         if (bind(sfd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            // success
             break;
         }
 
@@ -115,6 +116,7 @@ static int send_file_to_client(int client_fd)
 {
     int fd = open(STORAGE_FILE, O_RDONLY);
     if (fd == -1) {
+        // If file doesn't exist, treat as empty response
         if (errno == ENOENT) return 0;
         return -1;
     }
@@ -156,6 +158,7 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    // create and bind before daemonizing (required by assignment)
     listen_fd = create_and_bind(PORT);
     if (listen_fd == -1) {
         syslog(LOG_ERR, "Failed to create or bind socket: %s", strerror(errno));
@@ -179,14 +182,21 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
         if (pid > 0) {
+            // parent exits
             close(listen_fd);
             closelog();
             exit(EXIT_SUCCESS);
         }
+        // child continues
         if (setsid() == -1) {
             syslog(LOG_ERR, "setsid failed: %s", strerror(errno));
+            // continue anyway
         }
-        if (chdir("/") == -1) {}
+        // Optional: change working dir to /
+        if (chdir("/") == -1) {
+            // not fatal
+        }
+        // redirect std fds to /dev/null
         int fd = open("/dev/null", O_RDWR);
         if (fd != -1) {
             dup2(fd, STDIN_FILENO);
@@ -200,12 +210,8 @@ int main(int argc, char *argv[])
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &addr_len);
-
         if (client_fd == -1) {
-            if (errno == EINTR) {
-                if (exit_requested) break;   // <-- ADDED
-                continue;
-            }
+            if (errno == EINTR) continue; // interrupted by signal
             syslog(LOG_ERR, "accept failed: %s", strerror(errno));
             break;
         }
@@ -218,58 +224,101 @@ int main(int argc, char *argv[])
 
         syslog(LOG_INFO, "Accepted connection from %s", client_ip);
 
+        // Receive loop for this client
         char recvbuf[RECV_BUF_SIZE];
         char *packet = NULL;
         size_t packet_len = 0;
 
         while (!exit_requested) {
             ssize_t r = recv(client_fd, recvbuf, sizeof(recvbuf), 0);
-            if (r == 0) break;
+            if (r == 0) {
+                // client closed connection
+                break;
+            }
             if (r < 0) {
                 if (errno == EINTR) continue;
                 syslog(LOG_ERR, "recv failed: %s", strerror(errno));
                 break;
             }
 
+            // append received bytes into packet buffer
             size_t off = 0;
             while (off < (size_t)r) {
+                // find newline in remaining buffer
                 char *newline = memchr(recvbuf + off, '\n', (size_t)r - off);
                 size_t chunk_len = (newline) ? (size_t)(newline - (recvbuf + off)) + 1 : (size_t)r - off;
 
+                // realloc packet to hold chunk
                 char *new_packet = realloc(packet, packet_len + chunk_len);
                 if (!new_packet) {
                     syslog(LOG_ERR, "malloc/realloc failed");
                     free(packet);
                     packet = NULL;
                     packet_len = 0;
+                    // skip the chunk (as per assignment we can discard on malloc failure)
                     off += chunk_len;
-                    if (newline) send_file_to_client(client_fd);
+                    if (newline) {
+                        // as packet considered complete but we couldn't save, still should send file content
+                        if (send_file_to_client(client_fd) == -1) {
+                            // ignore send error but break
+                            off = (size_t)r;
+                            break;
+                        }
+                    }
                     continue;
                 }
-
                 packet = new_packet;
                 memcpy(packet + packet_len, recvbuf + off, chunk_len);
                 packet_len += chunk_len;
                 off += chunk_len;
 
                 if (newline) {
-                    append_packet_to_file(packet, packet_len);
-                    send_file_to_client(client_fd);
+                    // complete packet: append to file then send file content to client
+                    if (append_packet_to_file(packet, packet_len) == -1) {
+                        syslog(LOG_ERR, "Failed to append to %s: %s", STORAGE_FILE, strerror(errno));
+                    }
+
+                    if (send_file_to_client(client_fd) == -1) {
+                        // error sending file; log and break
+                        syslog(LOG_ERR, "Error sending file to client %s: %s", client_ip, strerror(errno));
+                        // continue to close connection
+                        free(packet);
+                        packet = NULL;
+                        packet_len = 0;
+                        break;
+                    }
+
+                    // reset packet buffer for next packet
                     free(packet);
                     packet = NULL;
                     packet_len = 0;
                 }
             }
+
+            // continue receiving more data
         }
 
         close(client_fd);
         syslog(LOG_INFO, "Closed connection from %s", client_ip);
 
         free(packet);
+        packet = NULL;
+        packet_len = 0;
     }
 
+    // graceful shutdown
+    syslog(LOG_INFO, "Caught signal, exiting");
+
     if (listen_fd != -1) close(listen_fd);
-    unlink(STORAGE_FILE);
+
+    // remove storage file
+    if (unlink(STORAGE_FILE) == -1) {
+        if (errno != ENOENT) {
+            syslog(LOG_ERR, "Failed to remove %s: %s", STORAGE_FILE, strerror(errno));
+        }
+    }
+
     closelog();
     return 0;
 }
+
