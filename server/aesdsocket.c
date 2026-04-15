@@ -267,6 +267,20 @@ int main(int argc, char *argv[])
             }
         }
 
+        // ✅ ADDED FIX: flush remaining data if no newline detected
+        if (packet && packet_len > 0) {
+            if (append_packet_to_file(packet, packet_len) == -1) {
+                syslog(LOG_ERR, "Failed to write remaining packet: %s", strerror(errno));
+            } else {
+                if (send_file_to_client(client_fd) == -1) {
+                    syslog(LOG_ERR, "Failed to send file to client: %s", strerror(errno));
+                }
+            }
+            free(packet);
+            packet = NULL;
+            packet_len = 0;
+        }
+
         close(client_fd);
         syslog(LOG_INFO, "Closed connection from %s", client_ip);
 
