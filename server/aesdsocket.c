@@ -224,7 +224,21 @@ int main(int argc, char *argv[])
 
         while (!exit_requested) {
             ssize_t r = recv(client_fd, recvbuf, sizeof(recvbuf), 0);
-            if (r == 0) break;
+            if (r == 0) {
+                if (packet && packet_len > 0) {
+                    if (append_packet_to_file(packet, packet_len) == -1) {
+                        syslog(LOG_ERR, "Failed to write remaining packet: %s", strerror(errno));
+                    } else {
+                        if (send_file_to_client(client_fd) == -1) {
+                            syslog(LOG_ERR, "Failed to send file to client: %s", strerror(errno));
+                        }
+                    }
+                    free(packet);
+                    packet = NULL;
+                    packet_len = 0;
+                }
+                break;
+            }
             if (r < 0) {
                 if (errno == EINTR) continue;
                 syslog(LOG_ERR, "recv failed: %s", strerror(errno));
