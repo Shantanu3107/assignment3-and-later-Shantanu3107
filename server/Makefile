@@ -2,9 +2,7 @@ CC ?= $(CROSS_COMPILE)gcc
 CFLAGS := -Wall -Wextra -Werror -g
 TARGET := aesdsocket
 
-.PHONY: all clean default
-
-default: all
+.PHONY: all clean
 
 all: $(TARGET)
 
